@@ -69,7 +69,24 @@ def clean(L8, strong=False):
 # ---------- 3. natural window-light grade (from user's reference photo) ----------
 
 REF = dict(L_lo=4.0, L_hi=94.0, L_med=53.5, chroma_med=13.0, hi_a=0.5, hi_b=3.0)
+def balance_stats(rgb):   # rgb float 0..1, robust grey-world over normal (not extreme / not vivid) pixels
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2Lab)
+    L = lab[..., 0]; C = np.hypot(lab[..., 1], lab[..., 2])
+    m = (L > 20) & (L < 95) & (C < 50)
+    return rgb[m].mean(0)
+REF_RATIO = np.array([1.091, 1.0, 0.956], np.float32)   # reference photo's R/G, B/G balance
+def white_balance(bgr8, strength=0.9):
+    rgb = cv2.cvtColor(bgr8, cv2.COLOR_BGR2RGB).astype(np.float32) / 255
+    m = balance_stats(rgb); ratio = m / m[1]
+    gains = np.clip((REF_RATIO / ratio) ** strength, 0.6, 1.6)
+    gains = gains / gains[1]
+    out = np.clip(rgb * gains, 0, 1)
+    # keep the overall brightness the same
+    out = np.clip(out * (rgb.mean() / max(out.mean(), 1e-4)), 0, 1)
+    return cv2.cvtColor((out * 255 + 0.5).astype(np.uint8), cv2.COLOR_RGB2BGR), gains
+
 def grade(bgr8, strength=1.0):
+    bgr8, _ = white_balance(bgr8, 0.9 * strength)
     lab = cv2.cvtColor(bgr8.astype(np.float32) / 255, cv2.COLOR_BGR2Lab)
     L, a, b = cv2.split(lab)
     lo, hi = np.percentile(L, [1, 99])
@@ -89,17 +106,13 @@ def grade(bgr8, strength=1.0):
     C = np.sqrt(a * a + b * b)
     mid = (L2 > 20) & (L2 < 88)
     cm = float(np.median(C[mid])) if mid.any() else 10
-    k = np.clip(REF['chroma_med'] / max(cm, 1e-3), 0.9, 1.35)
+    k = np.clip(REF['chroma_med'] / max(cm, 1e-3), 0.65, 1.35)
     k = 1 + (k - 1) * strength
     boost = 1 + (k - 1) * np.clip(1 - C / 30, 0, 1)
     a, b = a * boost, b * boost
-    # sunlit warmth on skin tones only (hue 25-75 deg, real colour), tiny warmth elsewhere
-    C = np.sqrt(a * a + b * b); hue = np.degrees(np.arctan2(b, a))
-    skin = ((hue > 25) & (hue < 75) & (C > 5) & (C < 40)).astype(np.float32)
-    skin = cv2.GaussianBlur(skin, (0, 0), 2)
-    wmid = np.exp(-((L2 - 60) / 22) ** 2) * strength
-    a = a + wmid * (0.3 + 1.5 * skin)
-    b = b + wmid * (0.8 + 3.0 * skin)
+    C = np.sqrt(a * a + b * b)
+    lim = np.where(C > 28, 28 + 14 * np.tanh((C - 28) / 14), C) / np.maximum(C, 1e-3)
+    a, b = a * lim, b * lim
     out = cv2.cvtColor(cv2.merge([np.clip(L2, 0, 100), a, b]).astype(np.float32), cv2.COLOR_Lab2BGR)
     return np.clip(out * 255 + 0.5, 0, 255).astype(np.uint8)
 
