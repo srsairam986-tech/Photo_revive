@@ -11,16 +11,30 @@ android {
         applicationId = "com.sairam.photorevive"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        // every GitHub build gets a higher number, so it installs as an update
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+        versionName = "1.${System.getenv("GITHUB_RUN_NUMBER") ?: "0"}"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+    }
+
+    // The build's remembered signing key (see .github/workflows/build.yml); falls back to the debug key locally.
+    val reviveKey = file("${System.getProperty("user.home")}/.revive-key/photorevive.jks")
+    signingConfigs {
+        if (reviveKey.exists()) {
+            create("revive") {
+                storeFile = reviveKey
+                storePassword = "photorevive"
+                keyAlias = "photorevive"
+                keyPassword = "photorevive"
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // signed with the debug key so the APK installs directly on your phone
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (reviveKey.exists()) signingConfigs.getByName("revive")
+            else signingConfigs.getByName("debug")
         }
     }
     compileOptions {
