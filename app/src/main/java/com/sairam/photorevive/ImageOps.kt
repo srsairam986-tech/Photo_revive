@@ -11,9 +11,7 @@ import org.opencv.imgproc.Imgproc
 import org.opencv.photo.Photo
 import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.atan2
 import kotlin.math.ceil
-import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.ln
 import kotlin.math.max
@@ -252,12 +250,15 @@ object ImageOps {
         return pct(c, 0.9) < 12f && c.average() < 8.0
     }
 
-    /** Natural window-light look: bright clean whites, soft contrast, warm sunlit skin. */
+    /** Natural window-light look like the reference: normal colour balance, bright clean whites, soft contrast. */
     fun naturalLight(img: LabImage, strength: Float = 1f) {
         val l = img.L
         val a = img.a
         val b = img.b
         val n = l.size
+
+        // 0. remove overall colour cast (orange / pink / blue) -> normal colours like the reference
+        whiteBalance(img, 0.9f * strength)
 
         // 1. brightness & contrast towards the reference
         val sl = sample(n) { l[it] }
@@ -310,25 +311,66 @@ object ImageOps {
                 a[i] *= lim; b[i] *= lim
             }
         }
+    }
 
-        // 4. sunlit warmth on skin tones only (hue 25-75 degrees with real colour), tiny warmth elsewhere
-        val skin = FloatArray(n)
+    // Overall colour balance of the reference photo (red/green and blue/green of its normal pixels)
+    private const val REF_RATIO_R = 1.091f
+    private const val REF_RATIO_B = 0.956f
+
+    /**
+     * Automatic white balance towards the reference photo: removes overall orange/pink/blue casts
+     * (scales red and blue, so skin stays warm while walls and whites become normal).
+     */
+    private fun whiteBalance(img: LabImage, strength: Float) {
+        val n = img.L.size
+        val all = FloatArray(n * 3)
         for (i in 0 until n) {
-            val c = hypot(a[i], b[i])
-            val hue = Math.toDegrees(atan2(b[i], a[i]).toDouble())
-            if (hue > 25 && hue < 75 && c > 5f && c < 40f) skin[i] = 1f
+            all[3 * i] = img.L[i].coerceIn(0f, 100f); all[3 * i + 1] = img.a[i]; all[3 * i + 2] = img.b[i]
         }
-        val sm = Mat(img.h, img.w, CvType.CV_32F)
-        sm.put(0, 0, skin)
-        Imgproc.GaussianBlur(sm, sm, Size(0.0, 0.0), 2.0)
-        sm.get(0, 0, skin)
-        sm.release()
+        val lab = Mat(img.h, img.w, CvType.CV_32FC3)
+        lab.put(0, 0, all)
+        val rgb = Mat()
+        Imgproc.cvtColor(lab, rgb, Imgproc.COLOR_Lab2RGB)
+        rgb.get(0, 0, all)
+
+        // robust grey-world: average of normal pixels (not too dark/bright, not vivid)
+        var sr = 0.0
+        var sg = 0.0
+        var sbl = 0.0
+        var cnt = 0
         for (i in 0 until n) {
-            val t = (l[i] - 60f) / 22f
-            val wmid = exp(-t * t) * strength
-            a[i] += wmid * (0.3f + 1.5f * skin[i])
-            b[i] += wmid * (0.8f + 3.0f * skin[i])
+            val l = img.L[i]
+            if (l > 20f && l < 95f && hypot(img.a[i], img.b[i]) < 50f) {
+                sr += all[3 * i].coerceIn(0f, 1f); sg += all[3 * i + 1].coerceIn(0f, 1f); sbl += all[3 * i + 2].coerceIn(0f, 1f)
+                cnt++
+            }
         }
+        if (cnt < 100 || sg <= 0.0) { release(lab, rgb); return }
+        val gR = (REF_RATIO_R / (sr / sg).toFloat()).pow(strength).coerceIn(0.6f, 1.6f)
+        val gB = (REF_RATIO_B / (sbl / sg).toFloat()).pow(strength).coerceIn(0.6f, 1.6f)
+
+        var before = 0.0
+        var after = 0.0
+        for (i in 0 until n) {
+            val r = all[3 * i].coerceIn(0f, 1f)
+            val g = all[3 * i + 1].coerceIn(0f, 1f)
+            val b = all[3 * i + 2].coerceIn(0f, 1f)
+            before += r + g + b
+            all[3 * i] = (r * gR).coerceIn(0f, 1f)
+            all[3 * i + 1] = g
+            all[3 * i + 2] = (b * gB).coerceIn(0f, 1f)
+            after += all[3 * i] + all[3 * i + 1] + all[3 * i + 2]
+        }
+        val keep = if (after > 0) (before / after).toFloat() else 1f     // same overall brightness
+        for (j in all.indices) all[j] = (all[j] * keep).coerceIn(0f, 1f)
+
+        rgb.put(0, 0, all)
+        Imgproc.cvtColor(rgb, lab, Imgproc.COLOR_RGB2Lab)
+        lab.get(0, 0, all)
+        for (i in 0 until n) {
+            img.L[i] = all[3 * i]; img.a[i] = all[3 * i + 1]; img.b[i] = all[3 * i + 2]
+        }
+        release(lab, rgb)
     }
 
     private inline fun sample(n: Int, f: (Int) -> Float): FloatArray {
