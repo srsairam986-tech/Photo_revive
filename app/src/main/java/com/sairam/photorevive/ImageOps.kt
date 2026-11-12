@@ -10,6 +10,8 @@ import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import org.opencv.photo.Photo
 import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.exp
 import kotlin.math.hypot
@@ -31,8 +33,8 @@ object ImageOps {
     private const val REF_HI = 94f
     private const val REF_MED = 53.5f
     private const val REF_CHROMA = 13f
-    private const val REF_HI_A = 1f
-    private const val REF_HI_B = 4f
+    private const val REF_HI_A = 0.5f
+    private const val REF_HI_B = 3f
 
     fun release(vararg mats: Mat) = mats.forEach { it.release() }
 
@@ -112,6 +114,65 @@ object ImageOps {
         return out
     }
 
+    /**
+     * Runs on the already de-noised photo, where thin scratches stand out from the grain.
+     * Only long, straight, thin lines count (real details like lips or necklaces are kept);
+     * strong mode also removes isolated dust specks.
+     */
+    private fun straightScratchAndDustMask(den: Mat, strong: Boolean): Mat {
+        val rows = den.rows()
+        val cols = den.cols()
+        val n = rows * cols
+        val med = Mat()
+        Imgproc.medianBlur(den, med, 7)
+        val s = ByteArray(n)
+        val m = ByteArray(n)
+        den.get(0, 0, s)
+        med.get(0, 0, m)
+        med.release()
+        val d = IntArray(n) { (s[it].toInt() and 0xFF) - (m[it].toInt() and 0xFF) }
+
+        val mask = ByteArray(n)
+        val labelArr = IntArray(n)
+        for (sign in intArrayOf(1, -1)) {
+            val cand = ByteArray(n)
+            for (i in 0 until n) if (sign * d[i] > 20) cand[i] = 1
+            val c = Mat(rows, cols, CvType.CV_8U)
+            c.put(0, 0, cand)
+            val labels = Mat()
+            val stats = Mat()
+            val cents = Mat()
+            val count = Imgproc.connectedComponentsWithStats(c, labels, stats, cents, 8, CvType.CV_32S)
+            val keep = BooleanArray(count)
+            for (i in 1 until count) {
+                val x = stats.get(i, Imgproc.CC_STAT_LEFT)[0].toInt()
+                val y = stats.get(i, Imgproc.CC_STAT_TOP)[0].toInt()
+                val w = stats.get(i, Imgproc.CC_STAT_WIDTH)[0]
+                val h = stats.get(i, Imgproc.CC_STAT_HEIGHT)[0]
+                val area = stats.get(i, Imgproc.CC_STAT_AREA)[0]
+                val length = hypot(w, h)
+                if (length >= 60 && max(w, h) >= 6 * max(min(w, h), 1.0) && area / length <= 3) {
+                    keep[i] = true
+                } else if (strong && area <= 20 && max(w, h) <= 6) {
+                    var peak = 0
+                    for (yy in y until y + h.toInt()) for (xx in x until x + w.toInt()) {
+                        peak = max(peak, abs(d[yy * cols + xx]))
+                    }
+                    if (peak > 45) keep[i] = true
+                }
+            }
+            labels.get(0, 0, labelArr)
+            for (i in 0 until n) if (keep[labelArr[i]]) mask[i] = 255.toByte()
+            release(c, labels, stats, cents)
+        }
+        val out = Mat(rows, cols, CvType.CV_8U)
+        out.put(0, 0, mask)
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
+        Imgproc.dilate(out, out, kernel)
+        kernel.release()
+        return out
+    }
+
     /** Remove scratches, film grain and soften camera shake on a grayscale photo. */
     fun clean(gray: Mat, strong: Boolean): Mat {
         val sigma = noiseSigma(gray)
@@ -125,8 +186,17 @@ object ImageOps {
         }
         mask.release()
         val h = (1.15 * sigma).coerceIn(3.0, 16.0).toFloat()
-        val dn = Mat()
+        var dn = Mat()
         Photo.fastNlMeansDenoising(cur, dn, h, 7, 15)
+        // second pass on the de-noised photo: thin straight scratches (+ dust in strong mode)
+        val mask2 = straightScratchAndDustMask(dn, strong)
+        if (Core.countNonZero(mask2) > 0) {
+            val fixed = Mat()
+            Photo.inpaint(dn, mask2, fixed, 4.0, Photo.INPAINT_TELEA)
+            dn.release()
+            dn = fixed
+        }
+        mask2.release()
         // gentle sharpening for shake; the AI upscaler recovers the rest
         val blur = Mat()
         Imgproc.GaussianBlur(dn, blur, Size(0.0, 0.0), 1.6)
@@ -196,23 +266,23 @@ object ImageOps {
         val span = max(hi - lo, 1e-3f)
         val med = ((pct(sl, 0.5) - lo) / span).coerceIn(0.01f, 0.99f)
         val tmed = (REF_MED - REF_LO) / (REF_HI - REF_LO)
-        val g = (ln(tmed) / ln(med)).coerceIn(0.75f, 1.3f)
+        val g = (ln(tmed) / ln(med)).coerceIn(0.8f, 1.25f)
         for (i in 0 until n) {
             val ln01 = ((l[i] - lo) / span).coerceIn(0f, 1f)
             val target = REF_LO + ln01.pow(g) * (REF_HI - REF_LO)
             l[i] += strength * (target - l[i])
         }
 
-        // 2. white balance: highlights towards warm window-white
+        // 2. white balance: clean warm-white highlights (removes pink/blue casts on white clothes, walls)
         var sa = 0.0
         var sb = 0.0
         var cnt = 0
-        for (i in 0 until n) if (l[i] > 75f) { sa += a[i]; sb += b[i]; cnt++ }
+        for (i in 0 until n) if (l[i] > 72f) { sa += a[i]; sb += b[i]; cnt++ }
         if (cnt > 200) {
             val da = (REF_HI_A - sa / cnt).toFloat()
             val db = (REF_HI_B - sb / cnt).toFloat()
             for (i in 0 until n) {
-                val w = ((l[i] - 30f) / 60f).coerceIn(0f, 1f) * 0.6f * strength
+                val w = ((l[i] - 35f) / 45f).coerceIn(0f, 1f) * 0.8f * strength
                 a[i] += da * w; b[i] += db * w
             }
         }
@@ -225,21 +295,32 @@ object ImageOps {
                 .filter { !it.isNaN() }.toFloatArray()
             if (c.isEmpty()) 10f else { c.sort(); pct(c, 0.5) }
         } else 10f
-        var k = (REF_CHROMA / max(cm, 1e-3f)).coerceIn(0.85f, 2.0f)
+        // gentle: lifts dull colour only, never pushes already strong colour further
+        var k = (REF_CHROMA / max(cm, 1e-3f)).coerceIn(0.9f, 1.35f)
         k = 1f + (k - 1f) * strength
         for (i in 0 until n) {
             val c = hypot(a[i], b[i])
-            val boost = 1f + (k - 1f) * (1f - c / 45f).coerceIn(0.25f, 1f)
+            val boost = 1f + (k - 1f) * (1f - c / 30f).coerceIn(0f, 1f)
             a[i] *= boost; b[i] *= boost
         }
 
-        // 4. warm, sunlit mid-tones (extra on skin hues)
+        // 4. sunlit warmth on skin tones only (hue 25-75 degrees with real colour), tiny warmth elsewhere
+        val skin = FloatArray(n)
         for (i in 0 until n) {
-            val t = (l[i] - 62f) / 24f
+            val c = hypot(a[i], b[i])
+            val hue = Math.toDegrees(atan2(b[i], a[i]).toDouble())
+            if (hue > 25 && hue < 75 && c > 5f && c < 40f) skin[i] = 1f
+        }
+        val sm = Mat(img.h, img.w, CvType.CV_32F)
+        sm.put(0, 0, skin)
+        Imgproc.GaussianBlur(sm, sm, Size(0.0, 0.0), 2.0)
+        sm.get(0, 0, skin)
+        sm.release()
+        for (i in 0 until n) {
+            val t = (l[i] - 60f) / 22f
             val wmid = exp(-t * t) * strength
-            val skin = if (a[i] > 0f && b[i] > 0f) 1f else 0f
-            a[i] += wmid * (1.2f + 2.0f * skin)
-            b[i] += wmid * (2.5f + 4.0f * skin)
+            a[i] += wmid * (0.3f + 1.5f * skin[i])
+            b[i] += wmid * (0.8f + 3.0f * skin[i])
         }
     }
 

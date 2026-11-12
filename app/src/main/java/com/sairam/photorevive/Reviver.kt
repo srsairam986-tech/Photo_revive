@@ -54,22 +54,30 @@ class Reviver(private val ctx: Context) {
             workW = max(1, (src.cols() * s / 4).roundToInt())
             workH = max(1, (src.rows() * s / 4).roundToInt())
         }
+        val workSize = Size(workW.toDouble(), workH.toDouble())
+        val shrinking = workH < region.rows()
+        val interp = if (shrinking) Imgproc.INTER_AREA else Imgproc.INTER_LANCZOS4
         val work = Mat()
-        val shrinking = workW < region.cols()
-        Imgproc.resize(region, work, Size(workW.toDouble(), workH.toDouble()), 0.0, 0.0,
-            if (shrinking) Imgproc.INTER_AREA else Imgproc.INTER_LANCZOS4)
-        if (region !== src) region.release()
-        src.release()
+        Imgproc.resize(region, work, workSize, 0.0, 0.0, interp)
 
         val original = ImageOps.rgbToLab(work)
         val mono = ImageOps.isMonochrome(original)
 
-        // 2. remove scratches, dust, grain; soften shake
+        // 2. remove scratches, dust, grain; soften shake.
+        // A small photo is cleaned at its own size BEFORE enlarging, so grain and scratches stay sharp enough to detect.
         progress.update(0.06f, "Removing scratches and noise…")
         val gray = Mat()
-        Imgproc.cvtColor(work, gray, Imgproc.COLOR_RGB2GRAY)
-        val clean = ImageOps.clean(gray, opt.strongClean)
+        Imgproc.cvtColor(if (shrinking) work else region, gray, Imgproc.COLOR_RGB2GRAY)
+        val cleaned = ImageOps.clean(gray, opt.strongClean)
         gray.release()
+        if (region !== src) region.release()
+        src.release()
+        val clean = if (shrinking) cleaned else {
+            val big = Mat()
+            Imgproc.resize(cleaned, big, workSize, 0.0, 0.0, Imgproc.INTER_LANCZOS4)
+            cleaned.release()
+            big
+        }
         val cleanRgb = Mat()
         Imgproc.cvtColor(clean, cleanRgb, Imgproc.COLOR_GRAY2RGB)
         val lab = ImageOps.rgbToLab(cleanRgb)
