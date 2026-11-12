@@ -66,6 +66,15 @@ jobs:
       - name: Build APK
         run: gradle assembleRelease --no-daemon --stacktrace
 
+      - name: Check the APK is valid
+        run: |
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          APK=$(ls app/build/outputs/apk/release/*.apk)
+          ls -la $APK
+          unzip -tq $APK
+          $BT/apksigner verify --verbose --print-certs $APK | head -12
+          $BT/aapt2 dump badging $APK | head -5
+
       - uses: actions/upload-artifact@v4
         with:
           name: PhotoRevive-apk
