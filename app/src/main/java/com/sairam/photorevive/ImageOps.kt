@@ -21,6 +21,7 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlin.math.tanh
 
 /** Photo in Lab colour space, one float array per channel (L 0..100, a/b about -128..127). */
 class LabImage(val w: Int, val h: Int, val L: FloatArray, val a: FloatArray, val b: FloatArray)
@@ -295,13 +296,19 @@ object ImageOps {
                 .filter { !it.isNaN() }.toFloatArray()
             if (c.isEmpty()) 10f else { c.sort(); pct(c, 0.5) }
         } else 10f
-        // gentle: lifts dull colour only, never pushes already strong colour further
-        var k = (REF_CHROMA / max(cm, 1e-3f)).coerceIn(0.9f, 1.35f)
+        // gentle: lifts dull colour, calms over-coloured results, never pushes strong colour further
+        var k = (REF_CHROMA / max(cm, 1e-3f)).coerceIn(0.65f, 1.35f)
         k = 1f + (k - 1f) * strength
         for (i in 0 until n) {
             val c = hypot(a[i], b[i])
             val boost = 1f + (k - 1f) * (1f - c / 30f).coerceIn(0f, 1f)
             a[i] *= boost; b[i] *= boost
+            // natural-colour limiter: soft ceiling on very strong colour (tames AI over-colouring)
+            val c2 = c * boost
+            if (c2 > 28f) {
+                val lim = (28f + 14f * tanh((c2 - 28f) / 14f)) / c2
+                a[i] *= lim; b[i] *= lim
+            }
         }
 
         // 4. sunlit warmth on skin tones only (hue 25-75 degrees with real colour), tiny warmth elsewhere

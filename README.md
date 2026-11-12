@@ -34,3 +34,5 @@ Colour photos skip step 3 and get cleaned, relit and upscaled.
 - AI colours are a best guess — the model cannot know a saree's or a wall's real colour.
 - Heavy motion blur can only be reduced, not fully fixed.
 - Very small originals (e.g. 300 px wide) will look smooth/painterly at 4K: the AI invents detail it cannot see.
+- Very blurry or badly damaged photos can come out over-coloured; the app tones this down automatically.
+- Very faint hairline scratches on white areas may remain.
