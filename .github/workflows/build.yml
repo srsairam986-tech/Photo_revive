@@ -1,0 +1,52 @@
+name: Build Photo Revive APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- 1. free AI models: download once, convert for the phone, cache for next builds
+      - name: Cache AI models
+        id: models
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/assets/models
+          key: models-v1-${{ hashFiles('tools/export_models.py') }}
+
+      - uses: actions/setup-python@v5
+        if: steps.models.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.11"
+
+      - name: Convert AI models (DDColor tiny + Real-ESRGAN)
+        if: steps.models.outputs.cache-hit != 'true'
+        run: |
+          pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install "numpy<2" onnx==1.16.1 onnxruntime==1.19.2 huggingface_hub==0.24.6 opencv-python-headless==4.10.0.84 safetensors tqdm pyyaml scikit-image requests
+          git clone --depth 1 https://github.com/piddnad/DDColor.git DDColor
+          python tools/export_models.py --ddcolor-repo DDColor --out app/src/main/assets/models
+          ls -la app/src/main/assets/models
+
+      # ---- 2. build the Android app
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build APK
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhotoRevive-apk
+          path: app/build/outputs/apk/release/*.apk

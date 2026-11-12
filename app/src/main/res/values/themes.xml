@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.PhotoRevive" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#F2B45A</item>
+        <item name="colorOnPrimary">#1A1208</item>
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+    </style>
+</resources>
